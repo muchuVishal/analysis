@@ -1,0 +1,283 @@
+---
+title: "Variant_classification_analysis"
+author: "albarcam"
+date: "2/1/2016"
+output: html_document
+---
+1. All dbNSFP variant files were put together, in cytosine. Columns with the variant possition, the ClinVar pathogenicity description and the prediction tools were selected. The final file is called  "dbNSFP3.1a_variant.ClinVar.PathoTools.txt"
+   
+In linux: 
+
+less dbNSFP3.1a_variant.chr* | awk -F "\t" '{if ($139 !~ /\./){print $_}}'|cut -f 1,2,3,4,7,26,33,38,42,49,52,55,58,60,63,67,71,74,75,139 > dbNSFP3.1a_variant.ClinVar.PathoTools.txt
+
+grep -v "#" dbNSFP3.1a_variant.ClinVar.PathoTools.txt >> header
+
+mv header dbNSFP3.1a_variant.ClinVar.PathoTools.txt
+
+
+2. Read the file in R:
+```{r}
+#install.packages("car")
+library(car)
+
+# put data from all chr together, to filter the variant files, take only the variants annotated in ClinVar and the columns with the patho tools: 
+
+pred.clinvar<-read.delim("/external.data/Variants/dbNSFP/dbNSFPv3.1/dbNSFP3.1a/dbNSFP3.1a_variant.ClinVar.PathoTools.txt", sep="\t")
+
+head(pred.clinvar)
+
+```
+
+3. Reorganize the columns, and give a new name:
+```{r}
+pred.clinvar<-pred.clinvar[,c(1:4,20,5,6:19)]
+
+
+name<-c("Chr", "Pos","R","A","clinvar_clnsig","rs_dbSNP144","SIFT", "Polyphen2_HVAR","LRT_pred","MutationTaster_pred","MutationAssessor_pred",
+         "FATHMM", "PROVEAN","VEST3","CADD", "DANN", "fathmm.MKL","MetaSVM","MetaLR_pred","Reliability_index")
+name
+colnames(pred.clinvar)<-name
+
+head(pred.clinvar,n = 10 )
+summary(pred.clinvar)
+
+```
+
+
+
+4. Replace all the predictions by: disease causing = 1, tolerated=-1, unknown=0;
+
+   SIFT:     Polyphen      LRT_pred  MT      MA      FATHMM  PROVEAN   FATHMM.MKL  MetaSVM   MetaLR
+   D = 1     > 0.447 = 1   D = 1     A = 1   H = 1   D = 1   D = 1     D = 1       D = 1     D = 1
+   T = -1    < 0.447 = -1  N = -1    D = 1   M = 1   T = -1  N = -1    N = -1      T = -1   T = -1
+   . = 0     . = 0         . = 0     N = -1  L= -1   . = 0   . = 0     . = 0       . = 0     . = 0
+                           U = 0     P = -1  N= -1
+                                     . = 0   . = 0
+  
+
+5. create a loop to replace letters by 0, -1 and 1. The recode and which.max functions are used for selecting the most pathogenic score, when there are multiple predictions
+```{r}
+list.pred<-list("")
+list.pred
+new.x<-list("")
+z=1
+for (i in c(7,9:13,17:19))
+  { 
+  
+  pred.clinvar[,i]
+  x<-strsplit(as.character(pred.clinvar[,i]),";")
+  head(x, n=10)
+  length(x)
+
+
+        for (r in 1:length(x))
+          {
+          
+          a<-x[r][[1]][
+            which.max(recode(x[r][[1]],"c('T','N','P','L')='-1';c('D','A','H','M')='1';c('.','U')='0'"))
+            ]
+          #x[10][[1]][2]
+          new.x[r]<-unlist(a)
+          
+          #head(a)
+          #head(new.x)
+          
+                   
+          #length(new.x)
+          #head(new.x)
+          #new.x[6]
+          #name[7]
+          
+        }
+  
+  
+  list.pred[z]<-list(new.x)
+  z<-z+1
+  }
+
+
+```
+
+
+6. To give a name to each list
+```{r}
+names(list.pred)<-name[c(7,9:13,17:19)]
+summary(list.pred)
+
+```
+
+7. To replace the letters describing the pathogenicity predictions by numbers (-1, 0, 1). It is also possible to do it in the previous loop, but R takes forever...
+
+```{r}
+list.pred$SIFT<-recode(list.pred$SIFT,"c('T','N','P','L')='-1';c('D','A','H','M')='1';c('.','U')='0'")
+
+list.pred$LRT_pred<-recode(list.pred$LRT_pred,"c('T','N','P','L')='-1';c('D','A','H','M')='1';c('.','U')='0'")
+
+list.pred$MutationTaster_pred<-recode(list.pred$MutationTaster_pred,"c('T','N','P','L')='-1';c('D','A','H','M')='1';c('.','U')='0'")
+
+list.pred$MutationAssessor_pred<-recode(list.pred$MutationAssessor_pred,"c('T','N','P','L')='-1';c('D','A','H','M')='1';c('.','U')='0'")
+
+list.pred$FATHMM<-recode(list.pred$FATHMM,"c('T','N','P','L')='-1';c('D','A','H','M')='1';c('.','U')='0'")
+
+list.pred$PROVEAN<-recode(list.pred$PROVEAN,"c('T','N','P','L')='-1';c('D','A','H','M')='1';c('.','U')='0'")
+
+list.pred$fathmm.MKL<-recode(list.pred$fathmm.MKL,"c('T','N','P','L')='-1';c('D','A','H','M')='1';c('.','U')='0'")
+
+list.pred$MetaSVM<-recode(list.pred$MetaSVM,"c('T','N','P','L')='-1';c('D','A','H','M')='1';c('.','U')='0'")
+
+list.pred$MetaLR_pred<- recode(list.pred$MetaLR_pred,"c('T','N','P','L')='-1';c('D','A','H','M')='1';c('.','U')='0'")
+
+```
+
+
+8. To convert the list of lists to a dataframe
+
+```{r}
+
+pred.w<- data.frame(lapply(data.frame((sapply(list.pred, `[`))), unlist))
+
+head(pred.w)
+
+
+```
+
+9. Now, for the patho tools with scores. If there is more than one score for one variant, the maximun score was chosen.We still need to decide which score we will accept for a predicted pathogenic variant. Empty values were converted to -1e+19:
+
+```{r}
+list.pred2<-list("")
+list.pred2
+new.x<-list("")
+z=1
+for (i in c(8,14,15,16))
+  { 
+  i=8
+  pred.clinvar[,i]
+  x<-strsplit(as.character(pred.clinvar[,i]),";")
+  x[x=="."]<- -9999999999999999999
+ 
+  
+  for (r in 1:length(x))
+    {
+      a<-max((x[r][[1]]))
+      new.x[r]<-unlist(a)
+    }
+  
+  list.pred2[z]<-list(new.x)
+  z<-z+1
+}
+```
+
+
+10. To give a name to each list
+```{r}
+names(list.pred2)<-name[c(8,14,15,16)]
+summary(list.pred2)
+```
+
+11. To convert PolyPhen score to -1, 0 and 1: 
+```{r}
+list.pred2$Polyphen2_HVAR[list.pred2$Polyphen2_HVAR >= 0.0  & list.pred2$Polyphen2_HVAR < 0.47] <- -1
+list.pred2$Polyphen2_HVAR[list.pred2$Polyphen2_HVAR >= 0.47] <- 1
+list.pred2$Polyphen2_HVAR[list.pred2$Polyphen2_HVAR == -1e+19] <- 0
+
+
+```
+
+
+
+11. To convert the list of lists in data.frame
+```{r}
+pred.w2<- data.frame(lapply(data.frame((sapply(list.pred2, `[`))), unlist))
+
+head(pred.w2)
+summary(pred.w2)
+
+```
+
+
+12. To save a table with the selected/modified scores:
+
+```{r}
+pred.w.CV<-data.frame(pred.clinvar[,1:5], pred.w, pred.w2)
+write.table(pred.w.CV, file ="/home/albarcam/data00.me/ClinVar/Transformed_prediction_scores.txt", row.names = FALSE, quote = FALSE, col.names = TRUE, sep="\t")
+
+```
+
+**Let's look at some correlations
+
+
+1. Read the file with the transformed scores:
+```{r}
+
+data<-read.table("/home/albarcam/data00.me/ClinVar/Transformed_prediction_scores.txt", header=TRUE)
+
+
+```
+
+
+2. Choose the rows with ClinVar data classified as (likely)pathogenic or (likely)bening. Then convert clinvar scores to 1 and -1 and check the correlation with the prediction tools:
+
+```{r}
+ppatho<-data[data$clinvar_clnsig <= 5 & data$clinvar_clnsig >= 2,5:15]
+
+summary((ppatho))
+
+
+ppatho$clinvar_clnsig[ppatho$clinvar_clnsig ==5] <- 1
+ppatho$clinvar_clnsig[ppatho$clinvar_clnsig == 4]<-1
+
+ppatho$clinvar_clnsig[ppatho$clinvar_clnsig == 3]<- -1
+ppatho$clinvar_clnsig[ppatho$clinvar_clnsig == 2]<- -1
+
+cor(ppatho)
+```
+
+3. How many undefined values for each prediction tool (score = 0):
+
+```{r}
+dim(ppatho)
+dim(ppatho[ppatho$SIFT == 0,])
+dim(ppatho[ppatho$LRT_pred == 0,])
+dim(ppatho[ppatho$MutationTaster_pred == 0,])
+dim(ppatho[ppatho$MutationAssessor_pred == 0,])
+dim(ppatho[ppatho$FATHMM == 0,])
+dim(ppatho[ppatho$PROVEAN == 0,])
+dim(ppatho[ppatho$fathmm.MKL == 0,])
+dim(ppatho[ppatho$MetaSVM == 0,])
+dim(ppatho[ppatho$Polyphen2_HVAR == 0,])
+
+```
+
+
+4. How well the sum of prediction tools classify clinvar variants, just a visualization with boxplots
+
+- Sift, Mutation Taster and Polyphen: This is our actual selection in the classification algorithm
+
+```{r}
+
+data.s3<-data.frame("CV"=ppatho$clinvar_clnsig,"SumScores1"=apply(ppatho[c(2,4,11)],1,sum))
+
+data.s<-data.frame("CV"=ppatho$clinvar_clnsig,"SumScores1"=apply(ppatho[2:11],1,sum))
+
+par(mfrow=c(1,2))
+
+boxplot(data.s3[data.s3$CV==1,2], data.s3[data.s3$CV==-1,2],  names = c("patho","benign"), xlab="ClinVar", ylab="SUM Scores Sift, MT, PP")
+
+boxplot(data.s[data.s$CV==1,2],  data.s[data.s$CV==-1,2],  names = c("patho","benign"), xlab="ClinVar", ylab="SUM Scores All")
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
