@@ -62,7 +62,7 @@ We will use the columns in *dbWithClin* to determine which columns in *dbChr13* 
 
 ```{r group-columns}
 
-idColumns    <- c("chr", "pos.1.based.", "ref", "alt", 'rs_dbSNP144")
+idColumns    <- c("chr", "pos.1.based.", "ref", "alt", "rs_dbSNP144")
 scoreColumns <- c("MutationTaster_score", "MutationTaster_converted_rankscore",
                   "MutationAssessor_score", "MutationAssessor_rankscore",
                   "Polyphen2_HVAR_score", "Polyphen2_HVAR_rankscore",
@@ -87,6 +87,7 @@ predColumns <- c("MutationTaster_pred",
                  "MetaLR_pred")
 outcome   <- "clinvar_clnsig"
 
+
 ```
 
 
@@ -97,10 +98,13 @@ Not all variants have an entry for Clinvar significance. We need to filter rows 
 datapath <- "/data/external.data/Variants/dbNSFP/dbNSFP3.1a_variant.chr"
 dbchrmfiles  <- paste(datapath, c(1:22, "X", "Y"), sep="")
 
-dbWithClin <- foreach(dbf=dbchrmfiles[1:4], .combine='rbind') %dopar% {
+dbWithClin <- foreach(dbf=dbchrmfiles, .combine='rbind') %dopar% {
   dbchrm <- read.delim(dbf)
   subset(dbchrm[, c(idColumns, predColumns, scoreColumns, outcome)], clinvar_clnsig != ".")
 }
+
+write.csv(dbWithClin, file = "dbWithClin.csv")
+
 
 ```
   
