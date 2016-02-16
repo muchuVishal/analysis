@@ -11,6 +11,8 @@
 # Session Data files
 *.RData
 .RData
+.Rdata
+*.Rdata
 
 # Example code in package build process
 *-Ex.R
@@ -28,4 +30,6 @@ vignettes/*.pdf
 
 # any data
 
+data
 data/
+reports/

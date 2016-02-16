@@ -1,0 +1,577 @@
+---
+title: 'A clean up of dbNSFP for analysis'
+output:
+  pdf_document:
+    fig_caption: yes
+    keep_tex: yes
+  html_document:
+    highlight: tango
+    number_sections: yes
+    theme: journal
+---
+
+``` {r setup, include=FALSE}
+
+library(knitr)
+knitr::opts_chunk$set(cache=FALSE)
+knitr::opts_chunk$set(echo=FALSE)
+knitr::opts_chunk$set(include=TRUE)
+knitr::opts_chunk$set(results="asis")
+knitr::opts_chunk$set(fig.width=12)
+knitr::opts_chunk$set(fig.height=14)
+prjpath <- "~/work/analysis/variantClassification/"
+datapath <- paste(prjpath, "data/", sep="")
+analpath <- paste(prjpath, "analysis/", sep="")
+rcodepath <- paste(analpath, "Rcode/", sep="")
+setwd(analpath)
+library(lattice)
+
+```
+
+# Introduction
+
+
+We clean up dbNSFP data for use with R, to evaluate its classification of variants.
+We read the data from a file that is subset of the entire genome where ClinVar assigns a disease class,
+
+```{r}
+
+#dbWithClin <- read.delim("/data/external.data/Variants/dbNSFP/dbNSFP3.1a/dbNSFP3.1a_variant.ClinVar.PathoTools.txt")
+dbWithClin <- read.delim(file="../../data/dbNSFP3.1a_variant.withClinvar.chrAll", stringsAsFactors=FALSE)
+print names(dbWithClin)
+print("Data summary")
+summary(dbWithClin)
+print("Data structure")
+str(dbWithClin)
+
+```
+
+
+We will use the columns in *dbWithClin* to determine which columns in *dbChr13* contain the required scores. Before we get there, we notice that many of the scores are provided as a string of the form xx;yy;zz, that indicate a different score for different transcripts. We will use the max/min or median of these *multiple-valued* scores. In addition the presence of a dot (.) seems to represent an NA.
+
+```{r navals}
+
+dbWithClin[dbWithClin == "."] <- NA
+
+```
+
+```{r group-columns}
+
+cols <- names(dbWithClin)
+cols[grepl(pattern="score", x=cols)]
+
+cols.rankscore <- cols[ grepl(x=cols, pattern="rankscore")]
+cols.score <- cols[ grepl(x=cols, pattern="score") & !grepl(x=cols, pattern="rankscore")]
+cols.pred <-  cols[ grepl(x=cols, pattern="pred")]
+models.score <- sapply(strsplit(x=cols.score, split="_"),
+                       function(xs) {
+                         l <- length(xs)
+                         paste(xs[1:(l-1)], collapse="_")
+                       })
+
+models.rankscore <- sapply(strsplit(x=cols.rankscore, split="_"),
+                           function(xs) {
+                             l <- length(xs)
+                             paste(xs[1:(l-1)], collapse="_")
+                           })
+
+models.pred <- sapply(strsplit(x=cols.pred, split="_"),
+                      function(xs) {
+                        l <- length(xs)
+                        paste(xs[1:(l-1)], collapse="_")
+                      })
+
+idColumns    <- c("chr", "pos.1.based.", "ref", "alt", "rs_dbSNP144")
+outcome   <- "clinvar_clnsig"
+
+```
+We have checked that all the columns of *dbWithClin* are of class *character*. Some of the scores or rankscores are strings containing ";", which we can use to split the string, convert the result to a numeric vector, and extract an extremum or median value as the score. 
+
+```{r extract-scores}
+
+dbWithClinBup <- dbWithClin
+
+numval <- function(xs, extractval=median) {
+  xss <- strsplit(split=";", x=xs)
+  sapply(xss, function(ys) {
+    ys[ys=="."] <- NA
+    zs <- as.numeric(ys)
+    extractval(zs, na.rm=TRUE)
+  })
+}
+
+numval.df <- function(df, extractval = median) {
+  as.data.frame(
+    do.call(cbind,
+            lapply(df, function(xs) numval(xs, extractval))
+            )
+  )
+}
+
+                        
+cast.scores <- numval.df(dbWithClin[, cols.score])
+cast.rankscores <- numval.df(dbWithClin[, cols.rankscore])
+cast.clnvar <- as.numeric(dbWithClin$clinvar_clnsig)
+
+```
+
+
+We will not use all the rows, dropping those where *clnvar* is -6, -5, or 6. 
+
+```{r clinvarfilter}
+
+clnvarfilt <- !(cast.clnvar %in% c(-6, -5, 6))
+dbWithClin.flt <- dbWithClin[clnvarfilt,]
+cast.scores.flt <- cast.scores[clnvarfilt,]
+cast.rankscores.flt <- cast.rankscores[clnvarfilt,]
+cast.clnvar.flt <- cast.clnvar[clnvarfilt]
+preds.flt <- dbWithClin.flt[, cols.pred]
+
+dataToModel <- as.data.frame(cbind(cast.scores.flt,
+                                   cast.rankscores.flt,
+                                   cast.clnvar.flt))
+dataToModel$clnvar.binary <- as.numeric(cast.clnvar.flt %in% c(4,5))
+dataToModel$clnvar.all <- cast.clnvar.flt
+
+mtp <- dbWithClin.flt$MutationTaster_pred
+dataToModel$MutationTaster_pred <- grepl(pattern = "A", x = mtp) | grepl(pattern = "D", x = mtp)
+
+```
+
+###Simple intuitive model based on three prediction models in dbNSFP
+
+```{r ourmodel}
+
+ss <- 2*(as.numeric(dataToModel$SIFT_score <= 0.05) - 0.5)
+mts <- 2*(as.numeric(dataToModel$MutationTaster_converted_rankscore >= 0.31709) - 0.5)
+phs <- 2*(as.numeric(dataToModel$Polyphen2_HVAR_score >= 0.447) - 0.5)
+
+ss[is.na(ss)] <- 0
+mts[is.na(mts)] <- 0
+phs[is.na(phs)] <- 0
+sumscore <- ss + mts + phs
+ourpred <- as.numeric(sumscore >= 1)
+
+our.poss <- which(ourpred == 1)
+our.negs <- which(ourpred == 0)
+cln.poss <- which(dataToModel$clnvar.binary == 1)
+cln.negs <- which(dataToModel$clnvar.binary == 0)
+
+our.tpr <- length(intersect(our.poss, cln.poss))/length(cln.poss)
+our.tnr <- length(intersect(our.negs, cln.negs))/length(cln.negs)
+
+print("our intuitive model with Mutation taster, Polyphen2 HVAR, and SIFT gives us ")
+print(paste("Sensitivity (true positive rate)", round(our.tpr, 2)))
+print(paste("Specificity (true negative rate)", round(our.tnr, 2)))
+
+```
+
+
+We can use rankscores to get AUC for the different models
+```{r auc-values}
+
+auc.sift <- performance(
+  prediction(dataToModel$SIFT_converted_rankscore,
+             dataToModel$clnvar.binary),
+  "auc")@y.values[[1]]
+tpr.fnr.sift <- performance(
+  prediction(dataToModel$SIFT_converted_rankscore,
+             dataToModel$clnvar.binary),
+  "tpr", "fpr")
+plot(tpr.fnr.sift, colorize=TRUE)
+abline(v = 1 - our.tnr)
+abline(h = our.tpr)
+
+auc.pphdiv <- performance(
+  prediction(dataToModel$Polyphen2_HDIV_score,
+             dataToModel$clnvar.binary),
+  "auc")@y.values[[1]]
+tpr.fnr.pphdiv <- performance(
+  prediction(dataToModel$Polyphen2_HDIV_score,
+             dataToModel$clnvar.binary),
+  "tpr", "fpr")
+plot(tpr.fnr.pphdiv, colorize=TRUE)
+
+abline(v = 1 - our.tnr)
+abline(h = our.tpr)
+auc.mts <- performance(
+  prediction(dataToModel$MutationTaster_converted_rankscore,
+             dataToModel$clnvar.binary),
+  "auc")@y.values[[1]]
+tpr.fnr.mts <- performance(
+  prediction(dataToModel$MutationTaster_converted_rankscore,
+             dataToModel$clnvar.binary),
+  "tpr", "fpr")
+plot(tpr.fnr.mts, colorize=TRUE)
+abline(v = 1 - our.tnr)
+abline(h = our.tpr)
+
+plotColROC <- function(xcol,
+                       ycol="clnvar.binary",
+                       data = dataToModel,
+                       v=1-our.tnr, h=our.tpr) {
+  pred <- prediction(data[, xcol], data[, ycol])
+  perf <- performance(pred, 'tpr', 'fpr')
+  plot(perf, colorize=TRUE)
+  abline(h=h)
+  abline(v=v)
+}
+
+```
+
+
+```{r aucrs}
+
+auc.rs <- sapply(
+  cast.rankscores.flt,
+  function(xs) {
+    pred <- prediction(xs, dataToModel$clnvar.binary)
+    perf <- performance(pred, "auc")
+    perf@y.values[[1]]
+  }
+)
+  
+```
+
+Not all variants have an entry for Clinvar significance. We need to filter rows that contain these values.
+
+#Models
+We will mostly use the provided *rankscores* to make predictive-models for the disease class. 
+
+```{r filterClinvar}
+require(caret)
+seed(101)
+ctrl <- trainControl(method = "repeatedcv",
+                     repeats = 10,
+                     summaryFunction = twoClassSummary,
+                     classProbs = TRUE)
+Y <- rep("benign", nrow(dataToModel))
+Y[dataToModel$clnvar.binary == 1] <- "pathogenic"
+trIdx <- createDataPartition(dataToModel$clnvar.binary, p = 0.9, list=FALSE)
+
+lrFull <- train(x = cast.rankscores.flt,
+                y = Y,
+                method = "glm",
+                metric = "ROC",
+                trControl = ctrl)
+
+lrIdx <- train(x = cast.rankscores.flt[trIdx,],
+               y = Y[trIdx],
+               method = "glm",
+               metric = "ROC",
+               trControl = ctrl)
+
+
+preds.lrIdx <- predict(lrIdx,
+                       newdata=dataToModel[-trIdx, cols.rankscore],
+                       type="prob")
+auc.lrIdx <- performance(
+  prediction(preds.lrIdx[, 2], Y[-trIdx] == "pathogenic"),
+  "auc"
+)@y.values[[1]]
+tpr.fpr.lrIdx <- performance(
+  prediction(preds.lrIdx[, 2], Y[-trIdx] == "pathogenic"),
+  "tpr", "fpr"
+)
+
+plot(tpr.fpr.lrIdx, colorize=TRUE)
+abline(v = 1 - our.tnr)
+abline(h = our.tpr)
+
+```
+
+The resulting models do very well,
+
+```{r model-eval}
+
+require(ROCR)
+perfIdx <- performance(prediction(psIdx$pathogenic, Y[-trIdx] == "pathogenic"), "auc")
+print("test AUC for the model with a held-out set: ")
+print(perfIdx@y.values[[1]])
+
+```
+
+```{r rpart-train}
+
+seed(131)
+trIdx <- createDataPartition(dataToModel$clnvar.binary, p = 0.9, list=FALSE)
+threeCols <- c("MutationTaster_converted_rankscore",
+               "Polyphen2_HDIV_score", "SIFT_score")
+fit.rpart.3 <- train(x = dataToModel[trIdx , threeCols],
+                   y = Y[trIdx],
+                   method="rpart",
+                   tuneLength = 10,
+                   metric = "ROC",
+                   trControl = trainControl(
+                     summaryFunction = twoClassSummary,
+                     classProbs = TRUE,
+                     method = "repeatedcv",
+                     repeats = 3)
+                   )
+
+preds.rpart <- predict(fit.rpart,
+                       newdata=dataToModel[-trIdx, threeCols],
+                       type="prob")
+
+auc.rpart <- performance(
+  prediction(preds.rpart[, 2], Y[-trIdx] == "pathogenic"),
+  "auc"
+)@y.values[[1]]
+tpr.fpr.rpart <- performance(
+  prediction(preds.rpart[, 2], Y[-trIdx] == "pathogenic"),
+  "tpr", "fpr"
+)
+
+plot(tpr.fpr.rpart, colorize=TRUE)
+abline(v = 1 - our.tnr)
+abline(h = our.tpr)
+
+```
+
+VEST was good with logistic regression. Lets try a RPART for all predictors
+
+
+```{r rpart-train-all}
+
+seed(131)
+trIdx <- createDataPartition(dataToModel$clnvar.binary, p = 0.9, list=FALSE)
+fit.rpart.all <- train(x = dataToModel[trIdx, cols.rankscore],
+                   y = Y[trIdx],
+                   method="rpart",
+                   tuneLength = 10,
+                   metric = "ROC",
+                   trControl = trainControl(
+                     summaryFunction = twoClassSummary,
+                     classProbs = TRUE,
+                     method = "repeatedcv",
+                     repeats = 3)
+                   )
+
+preds.rpart <- predict(fit.rpart.all,
+                       newdata=dataToModel[-trIdx, cols.rankscore],
+                       type="prob")
+auc.rpart <- performance(
+  prediction(preds.rpart[, 2], Y[-trIdx] == "pathogenic"),
+  "auc"
+)@y.values[[1]]
+tpr.fpr.rpart <- performance(
+  prediction(preds.rpart[, 2], Y[-trIdx] == "pathogenic"),
+  "tpr", "fpr"
+)
+
+plot(tpr.fpr.rpart, colorize=TRUE)
+abline(v = 1 - our.tnr)
+abline(h = our.tpr)
+
+```
+
+Lets now try GBM
+
+```{r gbm-train-all}
+
+seed(131)
+trIdx <- createDataPartition(dataToModel$clnvar.binary, p = 0.9, list=FALSE)
+fit.gbm.all <- train(x = dataToModel[trIdx, cols.rankscore],
+                   y = Y[trIdx],
+                   method="gbm",
+                   tuneLength = 10,
+                   metric = "ROC",
+                   trControl = trainControl(
+                     summaryFunction = twoClassSummary,
+                     classProbs = TRUE,
+                     method = "repeatedcv",
+                     repeats = 3)
+                   )
+
+preds.gbm <- predict(fit.gbm.all,
+                     newdata=dataToModel[-trIdx, cols.rankscore],
+                     type="prob")
+auc.gbm <- performance(
+  prediction(preds.gbm[, 2], Y[-trIdx] == "pathogenic"),
+  "auc"
+)@y.values[[1]]
+tpr.fpr.gbm <- performance(
+  prediction(preds.gbm[, 2], Y[-trIdx] == "pathogenic"),
+  "tpr", "fpr"
+)
+
+plot(tpr.fpr.gbm, colorize=TRUE)
+abline(v = 1 - our.tnr)
+abline(h = our.tpr)
+
+```
+
+and a GBM for three predictors
+
+```{r gbm-train-3}
+
+seed(131)
+trIdx <- createDataPartition(dataToModel$clnvar.binary, p = 0.9, list=FALSE)
+fit.gbm.3 <- train(
+  x = dataToModel[trIdx, threeCols],
+  y = Y[trIdx],
+  method="gbm",
+  metric = "ROC",
+  trControl = trainControl(
+    summaryFunction = twoClassSummary,
+    classProbs = TRUE,
+    method = "repeatedcv",
+    number = 10,
+    repeats = 3),
+  tuneGrid = expand.grid(
+    interaction.depth=c(5,7,9),
+    n.trees=c(1, 5, 10, 20, 40, 80, 160, 320, 640),
+    shrinkage=c(0.01, 0.05, 0.1),
+    n.minobsinnode=10)
+)
+
+preds.gbm.3 <- predict(fit.gbm.3,
+                       newdata=dataToModel[-trIdx, threeCols],
+                       type="prob")
+auc.gbm.3 <- performance(
+  prediction(preds.gbm.3[, 2], Y[-trIdx] == "pathogenic"),
+  "auc"
+)@y.values[[1]]
+tpr.fpr.gbm.3 <- performance(
+  prediction(preds.gbm.3[, 2], Y[-trIdx] == "pathogenic"),
+  "tpr", "fpr"
+)
+
+plot(tpr.fpr.gbm.3, colorize=TRUE)
+abline(v = 1 - our.tnr)
+abline(h = our.tpr)
+
+```
+
+And also try random forests
+
+```{r randomforest}
+
+seed(131)
+trIdx <- createDataPartition(dataToModel$clnvar.binary,
+                             p = 0.9, list=FALSE)
+#Ximputed <- rfImpute(X, dataToModel$clnvar.binary, iter=5, ntree=300)
+Ximputed <- load("../../data/dbNSFPwithClinvarThreeCols.imputed.Rdata")
+
+fit.rf.3 <- train(
+  x = Ximputed[trIdx, threeCols],
+  y = Y[trIdx],
+  method="rf",
+  tuneLength = 10,
+  metric = "ROC",
+  allowParallel=TRUE,
+  trControl = trainControl(
+    summaryFunction = twoClassSummary,
+    classProbs = TRUE,
+    method = "repeatedcv",
+    repeats = 3
+  ),
+  tuneGrid = expand.grid(mtry=c(1,2,3))
+)
+
+preds.rf.3 <- predict(fit.rf.3,
+                     newdata=Ximputed[-trIdx,],
+                     type="prob")
+auc.rf.3 <- performance(
+  prediction(preds.rf.3[, 2], Y[-trIdx] == "pathogenic"),
+  "auc"
+)@y.values[[1]]
+tpr.fpr.rf.3 <- performance(
+  prediction(preds.rf.3[, 2], Y[-trIdx] == "pathogenic"),
+  "tpr", "fpr"
+)
+
+plot(tpr.fpr.rf.3, colorize=TRUE)
+abline(v = 1 - our.tnr)
+abline(h = our.tpr)
+
+```
+
+#Other data sets for model training and extended evaluation.
+
+So far we have used only those variants in dbNSFP that had Clinvar disease annotations. This is a small training set (about 27000 samples), and biased towards pathogenicity (80 percent). We will curate a data set by combining benign variants as polymorphisms (allele frequence > 1%) from 1000-genomes, with pathogenic variants as provided by HGMD. 
+
+For further evaluation, we will run our prediction on an independent data set, for example dbSNP, and analyze how many resulting pathogenic variants are not listed in Clinvar or HGMD.
+
+For both these goals, we need to gather data. We will read the variants from the provided VCFs, and subset those rows that occur in dbSNP.
+
+#HGMD
+
+We will include pathogenic variants from HGMD. We will use the HGMD VCF to annotate variants in dbNSFP (chromosome by chromosome).
+
+```{r readAndExamineHgmdVCF}
+
+require(VariantAnnotation)
+
+hgmd <- readVcf("../../data/HGMD_PRO_2015.2_hg19.vcf", "hg19")
+hgmd.df <- as.data.frame(rowRanges(hgmd))
+
+hgmd.refSeqs <- as.character(ref(hgmd))
+hgmd.altSeqs <- sapply(alt(hgmd), as.character)
+hgmd.chrms <- as.character(seqnames(hgmd))
+print(paste("HGMD has ", nrow(hgmd.df), " variants"))
+
+```
+
+```{r dbNSFPwithHGMD}
+
+#getDbNsfp.withHgmd <- function(fp, fn) {
+#  dbNsfpChr <- read.delim(paste(fp, fn, sep="/"))
+#  print(paste("read data from ", fp, fn))
+getDbNsfp.withHgmd <- function(dbNsfpChr) {
+  N <- nrow(dbNsfpChr)
+  dbNsfpChr$hg19_chr <- as.character(dbNsfpChr$hg19_chr)
+  ncores <- 4
+  nsplit <- sapply(1:ncores, function(i) floor(i*N/ncores))
+  nsplit.start <- c(0, nsplit[1:(ncores-1)]) + 1
+  nsplit.stop <- nsplit
+  nsplits <- lapply(1:ncores, function(i) nsplit.start[i]:nsplit.stop[i])
+  chrms <- unique(dbNsfpChr$hg19_chr)
+  dbNsfpChr.withHGMD <- foreach(ns=nsplits, .combine = "rbind")  %dopar% {
+    dbNsfpChr.split <- dbNsfpChr[ns,]
+    do.call(rbind, lapply(chrms, function(chrm) {
+      dbNsfp.chrm <- subset(dbNsfpChr.split, hg19_chr == chrm)
+      #dbNsfp.chrm <- subset(dbNsfpChr, hg19_chr == chrm)
+      dbNsfp.chrm <- dbNsfp.chrm[order(dbNsfp.chrm$hg19_pos.1.based.),]
+      hgmd.chrm <- hgmd[seqnames(hgmd) == chrm]
+      hgmd.chrm.pos <- start(ranges(hgmd.chrm))
+      hgmd.chrm.ref <- as.character(ref(hgmd.chrm))
+      hgmd.chrm.alt <- sapply(alt(hgmd.chrm), as.character)
+      pos.olp <- intersect(unique(dbNsfp.chrm$hg19_pos.1.based.),
+                           unique(hgmd.chrm.pos))
+      dbNsfp.chrm.olp <- subset(dbNsfp.chrm,
+                                hg19_pos.1.based. %in% pos.olp)
+      #print(paste("size of hgmd with chrm", chrm))
+      #print(dim(hgmd.chrm))
+      #print("size of dbNsfp with positions that appear in hgmd")
+      #print(nrow(dbNsfp.chrm.olp))
+      if (nrow(dbNsfp.chrm.olp) > 0) {
+        dbNsfp.chrm.olp.hgmd.class <- sapply(
+          1:nrow(dbNsfp.chrm.olp),
+          function(i) {
+            hgmd.chrm.dbnsfp <- hgmd.chrm[
+              hgmd.chrm.pos == dbNsfp.chrm.olp$hg19_pos.1.based.[i] &
+              hgmd.chrm.alt == dbNsfp.chrm.olp$alt[i] &
+              hgmd.chrm.ref == dbNsfp.chrm.olp$ref[i]
+            ]
+            vc <- info(hgmd.chrm.dbnsfp)$CLASS
+            if(length(vc) == 0) NA else unique(vc)
+          }
+        )
+        dbNsfp.chrm.olp$HGMD.class <- dbNsfp.chrm.olp.hgmd.class
+        subset(dbNsfp.chrm.olp, !is.na(HGMD.class))
+      } else {
+        dbNsfp.chrm.olp$HGMD.class = c()
+      }
+    }
+    ))
+  }
+  dbNsfpChr.withHGMD
+}
+
+```
+
+Using the function above we can collect all dbNSFP variants that have an HGMD annotation across all chromosomes,
+
+```{r collectDbNsfpWithHgmd}
+
