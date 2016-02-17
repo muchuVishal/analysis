@@ -506,18 +506,55 @@ require(VariantAnnotation)
 hgmd <- readVcf("../../data/HGMD_PRO_2015.2_hg19.vcf", "hg19")
 hgmd.df <- as.data.frame(rowRanges(hgmd))
 
-hgmd.refSeqs <- as.character(ref(hgmd))
+GMDhgmd.refSeqs <- as.character(ref(hgmd))
 hgmd.altSeqs <- sapply(alt(hgmd), as.character)
 hgmd.chrms <- as.character(seqnames(hgmd))
 print(paste("HGMD has ", nrow(hgmd.df), " variants"))
 
 ```
+We can process the object obtained by loading the VCF into a dataframe,
+```{r hgmddf}
+
+hgmd.df$REF <- as.character(ref(hgmd))
+hgmd.df$ALT <- sapply(alt(hgmd), as.character)
+hgmd.df$CLASS <- info(hgmd)$CLASS
+hgmd.snp.df <- subset(hgmd.df,
+                      nchar(REF) == 1 & nchar(ALT) == 1)
+```
+
+We have already done these steps and saved the dataframe as Rdata,
+and a csv.
+
+The simplest way to get HGMD annotations in dbNSFP is to merge,
+
+```{r mergeHGMDwithDbNSFP}
+
+fp <- "/data/analysis/dbNSFPv3.1a"
+fns <- list.files(fp)
+fns <- fns[grepl(x=fns, pattern="chr")]
+dbnsfp.hgmd <- do.call(
+  rbind,
+  lapply(fns, function(fn) {
+    print(paste("annotating file", fn))
+    dbn <- read.delim(paste(fp, fn, sep="/"))
+    dbn$hg19_chr <- as.character(dbn$hg19_chr)
+    merge(
+      dbn, hgmd.snp.df[, c("seqnames", "start", "REF", "ALT", "CLASS")], 
+      by.x = c("hg19_chr", "hg19_pos.1.based.", "ref", "alt"),
+      by.y = c("seqnames", "start", "REF", "ALT")
+    )
+  })
+)
+
+write.csv(dbnsfp.hgmd, file="dbnsfp.hgmd.csv")
+
+```
+          
+
+  
 
 ```{r dbNSFPwithHGMD}
 
-#getDbNsfp.withHgmd <- function(fp, fn) {
-#  dbNsfpChr <- read.delim(paste(fp, fn, sep="/"))
-#  print(paste("read data from ", fp, fn))
 getDbNsfp.withHgmd <- function(dbNsfpChr) {
   N <- nrow(dbNsfpChr)
   dbNsfpChr$hg19_chr <- as.character(dbNsfpChr$hg19_chr)
@@ -527,8 +564,10 @@ getDbNsfp.withHgmd <- function(dbNsfpChr) {
   nsplit.stop <- nsplit
   nsplits <- lapply(1:ncores, function(i) nsplit.start[i]:nsplit.stop[i])
   chrms <- unique(dbNsfpChr$hg19_chr)
-  dbNsfpChr.withHGMD <- foreach(ns=nsplits, .combine = "rbind")  %dopar% {
-    dbNsfpChr.split <- dbNsfpChr[ns,]
+  #dbNsfpChr.withHGMD <- foreach(ns=nsplits, .combine = "rbind")  %dopar% {
+  dbNsfpChr.withHGMD <- {
+    #dbNsfpChr.split <- dbNsfpChr[ns,]
+    dbNsfpChr.split <- dbNsfpChr
     do.call(rbind, lapply(chrms, function(chrm) {
       dbNsfp.chrm <- subset(dbNsfpChr.split, hg19_chr == chrm)
       #dbNsfp.chrm <- subset(dbNsfpChr, hg19_chr == chrm)
@@ -570,8 +609,114 @@ getDbNsfp.withHgmd <- function(dbNsfpChr) {
 }
 
 ```
+Reading files takes too long. Instead we will read in and process a small number (10,000) of lines at a time.
 
-Using the function above we can collect all dbNSFP variants that have an HGMD annotation across all chromosomes,
+```{r dbNSFPwithHGMDoneline}
 
-```{r collectDbNsfpWithHgmd}
+getDbNsfp.withHgmd.lbyl <- function(fpath) {
+  fcon <- file(fpath, "r")
+  wlop <- capture.output(system(paste("wc -l", fpath), intern=TRUE))
+  lnstr <- strsplit(x=wlop[1], split="\\s")[[1]][2]
+  N <- as.numeric(substr(x = lnstr, start=2, stop=nchar(lnstr)))
+  header <- strsplit(x=readLines(fcon, n = 1), split="\t")[[1]]
+  header <- gsub(x=header, pattern="(", replacement=".", fixed=TRUE)
+  header <- gsub(x=header, pattern=")", replacement=".", fixed=TRUE)
+  header <- gsub(x=header, pattern="-", replacement=".", fixed=TRUE)
+  header <- gsub(x=header, pattern="+", replacement=".", fixed=TRUE)
 
+  posIndx <- which(header == "hg19_pos.1.based.")
+  chrIndx <- which(header == "hg19_chr")
+  refIndx <- which(header == "ref")
+  altIndx <- which(header == "alt")
+
+  hgmd.bychrms <- lapply(unique(as.character(seqnames(hgmd))),
+                         function(chrm) {
+                           hgmd[seqnames(hgmd) == chrm]
+                         })
+
+  nsplits <- floor(N/10000) + 1
+  dbNsfp.chrm.hgmd <- do.call(rbind, lapply(1:nsplits, function(ns) {
+    print(paste("running splits of 10000, at ", ns))
+    lines <- readLines(fcon, n=10000)
+    df <- as.data.frame(do.call(rbind, strsplit(x=lines, split='\t')), stringsAsFactors = FALSE)
+    names(df) <- header
+    df[, posIndx] <- as.numeric(df[, posIndx])
+    chrms <- Filter(function(s) s != "hg19_chr", unique(df[, chrIndx]))
+    df.hgmd <- do.call(rbind, lapply(chrms, function(chrm) {
+      df.chrm <- df[df[, chrIndx] == chrm, ]
+      hgmd.chrm <- hgmd[seqnames(hgmd) == chrm]
+      hgmd.chrm.pos <- start(ranges(hgmd.chrm))
+      hgmd.chrm.ref <- as.character(ref(hgmd.chrm))
+      hgmd.chrm.alt <- sapply(alt(hgmd.chrm), as.character)
+      pos.olp <- intersect(unique(df.chrm[, posIndx]),
+                           unique(hgmd.chrm.pos))
+      df.chrm.olp <- df.chrm[df.chrm[, posIndx] %in% pos.olp, ]
+      print(paste("number of overlaps found", nrow(df.chrm.olp)))
+      if (nrow(df.chrm.olp) > 0) {
+        df.chrm.olp.hgmd.class <- sapply(
+          1:nrow(df.chrm.olp),
+          function(i) {
+            hgmd.chrm.dbnsfp <- hgmd.chrm[
+              hgmd.chrm.pos == df.chrm.olp[i, posIndx] &
+              hgmd.chrm.ref == df.chrm.olp[i, refIndx] &
+              hgmd.chrm.alt == df.chrm.olp[i, altIndx]
+            ]
+            vc <- info(hgmd.chrm.dbnsfp)$CLASS
+            if (length(vc) == 0) NA else unique(vc)[1]
+          }
+        )
+        df.chrm.olp$HGMD.class <- df.chrm.olp.hgmd.class
+        subset(df.chrm.olp, !is.na(HGMD.class))
+      } else {
+        df.chrm.olp$HGMD.class = c()
+      }
+    }))
+    df.hgmd
+  }))
+ dbNsfp.chrm.hgmd     
+}
+
+```
+The last attempt worked too slowly. Now we will use the first function we wrote, but sfppass it smaller data-frames than the full size
+
+```{r splitBeforeHgmd}
+
+fpath <- "/data/analysis/dbNSFPv3.1a/dbNSFP3.1a_variant.chr1"
+
+getDbNsfp.withHgmd.bySplits <- function(fpath) {
+  fcon <- file(fpath, "r")
+  wlop <- capture.output(system(paste("wc -l", fpath), intern=TRUE))
+  lnstr <- strsplit(x=wlop[1], split="\\s")[[1]][2]
+  N <- as.numeric(substr(x = lnstr, start=2, stop=nchar(lnstr)))
+
+  header <- strsplit(x=readLines(fcon, n = 1), split="\t")[[1]]
+  header <- gsub(x=header, pattern="(", replacement=".", fixed=TRUE)
+  header <- gsub(x=header, pattern=")", replacement=".", fixed=TRUE)
+  header <- gsub(x=header, pattern="-", replacement=".", fixed=TRUE)
+  header <- gsub(x=header, pattern="+", replacement=".", fixed=TRUE)
+
+  posIndx <- which(header == "hg19_pos.1.based.")
+  chrIndx <- which(header == "hg19_chr")
+  refIndx <- which(header == "ref")
+  altIndx <- which(header == "alt")
+
+  Ns <- 100000
+  nsplits <- floor(N/Ns) + 1
+  dbnsfp.withHgmd <- do.call(
+    rbind,
+    lapply(1:nsplits, function(ns) {
+      print(paste("running splits of", Ns, " at ", 100*round(ns/Ns, 2), "%"))
+      lines <- readLines(fcon, n=Ns)
+      df <- as.data.frame(
+        do.call(rbind, strsplit(x=lines, split='\t')),
+        stringsAsFactors = FALSE
+      )
+      print(paste("\t dataframe size ", nrow(df)))
+      names(df) <- header
+      getDbNsfp.withHgmd(df)
+    })
+  )
+  dbnsfp.withHgmd
+}
+
+```
