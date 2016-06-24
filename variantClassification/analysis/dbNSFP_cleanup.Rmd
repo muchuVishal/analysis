@@ -506,7 +506,7 @@ require(VariantAnnotation)
 hgmd <- readVcf("../../data/HGMD_PRO_2015.2_hg19.vcf", "hg19")
 hgmd.df <- as.data.frame(rowRanges(hgmd))
 
-GMDhgmd.refSeqs <- as.character(ref(hgmd))
+hgmd.refSeqs <- as.character(ref(hgmd))
 hgmd.altSeqs <- sapply(alt(hgmd), as.character)
 hgmd.chrms <- as.character(seqnames(hgmd))
 print(paste("HGMD has ", nrow(hgmd.df), " variants"))
@@ -532,23 +532,181 @@ The simplest way to get HGMD annotations in dbNSFP is to merge,
 fp <- "/data/analysis/dbNSFPv3.1a"
 fns <- list.files(fp)
 fns <- fns[grepl(x=fns, pattern="chr")]
+L <- 1000000
 dbnsfp.hgmd <- do.call(
   rbind,
   lapply(fns, function(fn) {
     print(paste("annotating file", fn))
-    dbn <- read.delim(paste(fp, fn, sep="/"))
-    dbn$hg19_chr <- as.character(dbn$hg19_chr)
-    merge(
-      dbn, hgmd.snp.df[, c("seqnames", "start", "REF", "ALT", "CLASS")], 
-      by.x = c("hg19_chr", "hg19_pos.1.based.", "ref", "alt"),
-      by.y = c("seqnames", "start", "REF", "ALT")
+    fname <- paste(fp, fn, sep="/")
+    fcon <- file(fname, "r")
+    wlop <- capture.output(system(paste("wc -l", fname), intern=TRUE))
+    lnstr <- strsplit(x=wlop[1], split="\\s")[[1]][2]
+    N <- as.numeric(substr(x = lnstr, start=2, stop=nchar(lnstr)))
+    print(paste("\t the file has", N, "lines"))
+    header <- strsplit(x=readLines(fcon, n = 1), split="\t")[[1]]
+    header <- gsub(x=header, pattern="(", replacement=".", fixed=TRUE)
+    header <- gsub(x=header, pattern=")", replacement=".", fixed=TRUE)
+    header <- gsub(x=header, pattern="-", replacement=".", fixed=TRUE)
+    header <- gsub(x=header, pattern="+", replacement=".", fixed=TRUE)
+    Ns <- floor(N/L) + 1
+    do.call(
+      rbind,
+      lapply(1:Ns, function(ns) {
+        print(paste("    split number ", ns))
+        lines <- readLines(fcon, n=L)
+        print("   lines read")
+        df <- as.data.frame(
+          do.call(rbind, strsplit(x=lines, split='\t')),
+          stringsAsFactors = FALSE
+        )
+        names(df) <- header
+        df$hg19_pos.1.based. <- as.numeric(df$hg19_pos.1.based.)
+        df$hg19_chr <- as.character(df$hg19_chr)
+        print("    data frame created")
+        mdf <- merge(
+          df, hgmd.snp.df[, c("seqnames", "start", "REF", "ALT", "CLASS")], 
+          by.x = c("hg19_chr", "hg19_pos.1.based.", "ref", "alt"),
+          by.y = c("seqnames", "start", "REF", "ALT")
+        )
+        print(paste("\tfound ", nrow(mdf), " HGMD annotations for ", nrow(df), " queries"))
+        print(paste("    % done", round(100*ns/Ns, 2)))
+        mdf
+      })
     )
   })
 )
 
+dbnsfp.hgmd[dbnsfp.hgmd == "."] <- NA
+
 write.csv(dbnsfp.hgmd, file="dbnsfp.hgmd.csv")
 
 ```
-          
 
-  
+Variants collected above will contain all hgmd annotated variants found in dbNSFP. We should filter these to keep only the pathogenic classes (DM and DM?), and remove polymorphisms (1000 Genomes AF > 0.01),
+
+```{r filterDbNSFPhgmd}
+
+minAF.polymorphisms <- 0.01
+print("variant disease classes in HGMD annotated in dbNSFP")
+print(ddply(dbnsfp.hgmd, .(CLASS), nrow))
+dbnsfp.hgmd.nonPolym <- subset(dbnsfp.hgmd, X1000Gp3_AF <= minAF.polymorphisms)
+
+print("variant disease classes in HGMD annotated in dbNSFP without polymorphisms")
+print(ddply(dbnsfp.hgmd.nonPolym, .(CLASS), nrow))
+
+```
+
+#Benign data from 1000 genomes
+1000 genomes data is more challenging in that it is 800 times bigger than HGMD. We have reduced its size from 80GB to 10GB by filtering out rare variants (AF < 0.02), and kept polymorphisms which we will mark as benign. There will be around 10 million variants in this data. We can replicate the code used for HGMD. 
+
+I fact dbNSFP contains a column for 1000 genomes data, which we can filter onek
+
+```{r filterdbnsfpAF}
+
+fp <- "/data/analysis/dbNSFPv3.1a"
+fns <- list.files(fp)
+fns <- fns[grepl(x=fns, pattern="chr")]
+L <- 1000000
+minAF.polymorphisms <- 0.01
+
+do.call(
+  rbind,
+  lapply(fns, function(fn) {
+    print(paste("filtering file", fn))
+    fname <- paste(fp, fn, sep="/")
+    fcon <- file(fname, "r")
+    wlop <- capture.output(system(paste("wc -l", fname), intern=TRUE))
+    lnstr <- strsplit(x=wlop[1], split="\\s")[[1]][2]
+    N <- as.numeric(substr(x = lnstr, start=2, stop=nchar(lnstr)))
+    print(paste("\t the file has", N, "lines"))
+    header <- strsplit(x=readLines(fcon, n = 1), split="\t")[[1]]
+    header <- gsub(x=header, pattern="(", replacement=".", fixed=TRUE)
+    header <- gsub(x=header, pattern=")", replacement=".", fixed=TRUE)
+    header <- gsub(x=header, pattern="-", replacement=".", fixed=TRUE)
+    header <- gsub(x=header, pattern="+", replacement=".", fixed=TRUE)
+    Ns <- floor(N/L) + 1
+    fdf <- do.call(
+      rbind,
+      lapply(1:Ns, function(ns) {
+        print(paste("    split number ", ns))
+        lines <- readLines(fcon, n=L)
+        print("   lines read")
+        df <- as.data.frame(
+          do.call(rbind, strsplit(x=lines, split='\t')),
+          stringsAsFactors = FALSE
+        )
+        df[df == "."] <- NA
+        names(df) <- make.names(header)
+        df$hg19_pos.1.based. <- as.numeric(df$hg19_pos.1.based.)
+        df$hg19_chr <- as.character(df$hg19_chr)
+        df$X1000Gp3_AF <- as.numeric(df$X1000Gp3_AF)
+        print("    data frame created")
+        fldf <- subset(df, !is.na(X1000Gp3_AF) & X1000Gp3_AF > minAF.polymorphisms)
+        print(
+          paste("    found ", nrow(fldf),
+                "number of polymorphisms among", nrow(df), "variants")
+        )
+        print(paste("    done", round(100*ns/Ns, 2), "%"))
+        fldf
+      })
+    )
+    print(
+      paste("final filtered ", fn, "size", nrow(fdf))
+    )
+    write.table(fdf, file=paste(fname, "polymorphisms", "tsv", sep="."))
+  })
+)
+
+
+```
+
+Now that we have dbNSFP filtered by 1000genome frequency for each chromosome, we can collect all the filtered variants into a single file,
+```{r collectAllFiltereddDbNsfpVariants}
+
+fp <- "/data/analysis/dbNSFPv3.1a"
+fns <- list.files(fp)
+fns <- fns[grepl(x=fns, pattern="polymorphisms")]
+
+dbfnsp.filtered.list <-   lapply(fns, function(fn) {
+  fname = paste(fp, fn, sep="/")
+  read.table(fname, heade=TRUE, stringsAsFactors=FALSE)
+})
+
+dbnsfp.AFlargerThan.0.01 <- do.call(rbind, dbfnsp.filtered.list)
+
+write.table(dbNSFP.AFlargerThan.0.01, file=paste(fp, "dbnsfp.polymorphisms.tsv", sep="/"))
+
+```
+
+###Merge HGMD annotations with 1000 Genome polymorphisms.
+
+With HGMD annotated HGMD, and 1000 Genome polymorphisms in hand, we can merge these two data sets into one data set
+
+```{r merge1000GwithHGMD}
+
+print("in hgmd annotated dbNSFP, the class distribution")
+print(ddply(dbnsfp.hgmd, .(CLASS), nrow))
+dbnsfp.hgmd.nonpolym <- subset(dbnsfp.hgmd, X1000Gp3_AF <= minAF.polymorphisms | is.na(X1000Gp3_AF))
+print("in hgmd annotated dbNSFP, the class distribution in non-polymorphisms")
+print(ddply(dbnsfp.hgmd.nonpolym, .(CLASS), nrow))
+dbnsfp.hgmd.binary <- subset(dbnsfp.hgmd.nonpolym, CLASS == "DM" | CLASS == "DM?")
+dbnsfp.hgmd.binary$CLASS <- "pathogenic"
+dbnsfp.AFlargerThan.0.01$CLASS <- "benign"
+
+common.names <- intersect(names(dbnsfp.hgmd.binary), names(dbnsfp.AFlargerThan.0.01))
+dbnsfp.hgmd.1000G <- rbind(dbnsfp.hgmd.binary[, common.names], dbnsfp.AFlargerThan.0.01[, common.names])
+
+write.csv(dbnsfp.hgmd.1000G, file="/data/analysis/dbnsfp.hgmd.1000G.csv", row.names=FALSE)
+
+```
+
+
+```{r merge1KGenomeswithDbNSFP}
+
+onek.chr1 <- readVcf("/data/analysis/1000genomes/AFabove.0.02/chr1.vcf.gz")
+onek.chr1.df <- as.data.frame(rowRanges(onek.chr1)
+onek.chr1.df$REF <- as.character(ref(onek.chr1))
+onek.chr1.df$ALT <- sapply(alt(onek.chr1), as.character)
+onek.chr1.df$CLASS <- "B"
+
+```
