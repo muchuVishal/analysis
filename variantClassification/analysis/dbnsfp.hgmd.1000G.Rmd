@@ -1,0 +1,540 @@
+title: 'Variant Disease Class classification"
+---
+output:
+  pdf_document:
+    fig_caption: yes
+    keep_tex: yes
+  html_document:
+    highlight: tango
+    number_sections: yes
+    theme: journal
+---
+
+``` {r setup, include=FALSE}
+
+library(knitr)
+knitr::opts_chunk$set(cache=FALSE)
+knitr::opts_chunk$set(echo=FALSE)
+knitr::opts_chunk$set(include=TRUE)
+knitr::opts_chunk$set(results="asis")
+knitr::opts_chunk$set(fig.width=12)
+knitr::opts_chunk$set(fig.height=14)
+prjpath <- "~/work/analysis/variantClassification/"
+datapath <- paste(prjpath, "data/", sep="")
+analpath <- paste(prjpath, "analysis/", sep="")
+rcodepath <- paste(analpath, "Rcode/", sep="")
+setwd(analpath)
+library(lattice)
+
+```
+
+#Introduction
+
+We build a statistical model to classify variant by their propensity to cause disease. We have already curated data that we will use for training. Our first generation of models used dbNSFP which had clinvar disease annotation. We have also a data set whose disease class comes from HGMD, and benign comes for 1000 Genome polymorphisms
+
+```{r setclinvardatatypes}
+
+dbnsfp.clinvar <- read.csv("/data/analysis/dbNSFP3.1a_variant.withClinvar.chrAll.csv", header=TRUE, stringsAsFactors=FALSE)
+dbnsfp.clinvar.rf <- data.frame(
+  lapply(names(dbnsfp.clinvar),
+         function(n) {
+           cl <- class(dbnsfp.hgmd.1000G[, n]) 
+           print(paste(n, cl))
+           if (cl == "integer") {
+             as.integer(dbnsfp.clinvar[, n])
+           } else if (cl == "numeric") {
+             as.numeric(dbnsfp.clinvar[, n])
+           } else {
+             dbnsfp.clinvar[, n]
+           }
+         }),
+  stringsAsFactors=FALSE
+)
+names(dbnsfp.clinvar.rf) <- names(dbnsfp.clinvar)
+dbnsfp.clinvar <- dbnsfp.clinvar.rf
+
+```
+
+
+```{r combineClinVarWithHGMD}
+
+
+dbnsfp.clinvar <- subset(dbnsfp.clinvar, clinvar_clnsig %in% c("5", "2", "3", "4"))
+
+dbnsfp.clinvar$CLASS <- sapply(
+  dbnsfp.clinvar$clinvar_clnsig, function(csgn) {
+    if (csgn == "5" | csgn == "4") "pathogenic" else "benign"
+  }
+)
+
+dbnsfp.hgmd.1000G <- read.csv("/data/analysis/dbnsfp.hgmd.1000G.csv", stringsAsFactors=FALSE)
+
+dbnsfp.hgmd.clinvar.1000G <- rbind(dbnsfp.clinvar, dbnsfp.hgmd.1000G)
+```
+
+To make models, we gather groups of column names in the dataset
+
+```{r groupnames}
+
+cols <- names(dbnsfp.hgmd.clinvar.1000G)
+cols.rankscore <- cols[ grepl(x=cols, pattern="rankscore")]
+cols.score <- cols[ grepl(x=cols, pattern="score") & !grepl(x=cols, pattern="rankscore")]
+cols.pred <-  cols[ grepl(x=cols, pattern="pred")]
+models.score <- sapply(strsplit(x=cols.score, split="_"),
+                       function(xs) {
+                         l <- length(xs)
+                         paste(xs[1:(l-1)], collapse="_")
+                       })
+
+models.rankscore <- sapply(strsplit(x=cols.rankscore, split="_"),
+                           function(xs) {
+                             l <- length(xs)
+                             paste(xs[1:(l-1)], collapse="_")
+                           })
+
+models.pred <- sapply(strsplit(x=cols.pred, split="_"),
+                      function(xs) {
+                        l <- length(xs)
+                        paste(xs[1:(l-1)], collapse="_")
+                      })
+
+idColumns    <- c("hg19_chr", "hg19_pos.1.based.", "ref", "alt")
+outcome   <- "CLASS"
+
+```
+
+#Our simple model
+
+```{r ourmodel}
+
+ss <- 2*(as.numeric(dbnsfp.hgmd.clinvar.1000G$SIFT_score <= 0.05) - 0.5)
+mts <- 2*(as.numeric(dbnsfp.hgmd.clinvar.1000G$MutationTaster_converted_rankscore >= 0.31709) - 0.5)
+phs <- 2*(as.numeric(dbnsfp.hgmd.clinvar.1000G$Polyphen2_HVAR_score >= 0.447) - 0.5)
+
+ss[is.na(ss)] <- 0
+mts[is.na(mts)] <- 0
+phs[is.na(phs)] <- 0
+sumscore <- ss + mts + phs
+ourpred <- as.numeric(sumscore >= 1)
+
+our.poss <- which(ourpred == 1)
+our.negs <- which(ourpred == 0)
+cln.poss <- which(dbnsfp.hgmd.clinvar.1000G$CLASS == "pathogenic")
+cln.negs <- which(dbnsfp.hgmd.clinvar.1000G$CLASS == "benign")
+
+our.tpr <- length(intersect(our.poss, cln.poss))/length(cln.poss)
+our.tnr <- length(intersect(our.negs, cln.negs))/length(cln.negs)
+
+print("our intuitive model with Mutation taster, Polyphen2 HVAR, and SIFT gives us ")
+print(paste("Sensitivity (true positive rate)", round(our.tpr, 2)))
+print(paste("Specificity (true negative rate)", round(our.tnr, 2)))
+
+```
+
+#Simplify numeric data
+
+Some of the columns may have data for more than one transcript, numeric values separated by a semi-colon. We need to simplify them.
+```{r simplify}
+
+numval <- function(xs, extractval=median) {
+  if (class(xs) != "character") xs
+  else {
+    xss <- strsplit(split=";", x=xs)
+    sapply(xss, function(ys) {
+      ys[ys=="."] <- NA
+      zs <- as.numeric(ys)
+      extractval(zs, na.rm=TRUE)
+    })
+  }
+}
+
+numval.df <- function(df, extractval = median) {
+  as.data.frame(
+    do.call(cbind,
+            lapply(df, function(xs) numval(xs, extractval))
+            )
+  )
+}
+
+```
+
+
+
+#Logistic Regression
+
+```{r logreg}
+
+library(caret)
+library(ROCR)
+
+set.seed(101)
+trIdx <- createDataPartition(dbnsfp.hgmd.clinvar.1000G.num$CLASS, p = 0.5, list=FALSE)
+Y = dbnsfp.hgmd.clinvar.1000G.num$CLASS
+
+lrIdx <- train(
+  x = dbnsfp.hgmd.clinvar.1000G.num[trIdx, cols.rankscore],
+  y = Y[trIdx],
+  method = "glm",
+  metric = "ROC",
+  trControl = trainControl(
+    method="repeatedcv",
+    repeats=10,
+    summaryFunction=twoClassSummary,
+    classProbs=TRUE
+  )
+)
+
+preds.lrIdx <- predict(
+  lrIdx,
+  newdata = dbnsfp.hgmd.clinvar.1000G.num[-trIdx, cols.rankscore],
+  type="prob"
+)
+
+auc.lrIdx <- performance(
+  prediction(preds.lrIdx[, 2], Y[-trIdx] == "pathogenic"),
+  "auc"
+)@y.values[[1]]
+
+tpr.fpr.lrIdx <- performance(
+  prediction(preds.lrIdx[, 2], Y[-trIdx] == "pathogenic"),
+  "tpr", "fpr"
+)
+
+plot(tpr.fpr.lrIdx, colorize=TRUE)
+
+```
+
+```{r rpart}
+
+set.seed(101)
+trIdx <- createDataPartition(dbnsfp.hgmd.clinvar.1000G.num$CLASS, p = 0.9, list=FALSE)
+threeCols <- c("MutationTaster_converted_rankscore",
+               "Polyphen2_HDIV_score", "SIFT_score")
+
+fit.rpart.3 <- train(
+  x = dbnsfp.hgmd.clinvar.1000G.num[trIdx , threeCols],
+  y = Y[trIdx],
+  method="rpart",
+  tuneLength = 10,
+  metric = "ROC",
+  trControl = trainControl(
+    summaryFunction = twoClassSummary,
+    classProbs = TRUE,
+    method = "repeatedcv",
+    repeats = 3)
+)
+
+preds.rpart.3 <- predict(
+  fit.rpart.3,
+  newdata=dbnsfp.hgmd.clinvar.1000G.num[-trIdx, threeCols],
+  type="prob"
+)
+
+auc.rpart.3 <- performance(
+  prediction(preds.rpart.3[, 2], Y[-trIdx] == "pathogenic"),
+  "auc"
+)@y.values[[1]]
+tpr.fpr.rpart.3 <- performance(
+  prediction(preds.rpart.3[, 2], Y[-trIdx] == "pathogenic"),
+  "tpr", "fpr"
+)
+
+plot(tpr.fpr.rpart.3, colorize=TRUE)
+abline(v = 1 - our.tnr)
+abline(h = our.tpr)
+
+```
+
+```{r rpart-all}
+
+fit.rpart.all <- train(
+  x = dbnsfp.hgmd.clinvar.1000G.num[trIdx, cols.rankscore],
+  y = Y[trIdx],
+  method="rpart",
+  tuneLength = 10,
+  metric = "ROC",
+  trControl = trainControl(
+    summaryFunction = twoClassSummary,
+    classProbs = TRUE,
+    method = "repeatedcv",
+    repeats = 3)
+)
+
+preds.rpart <- predict(
+  fit.rpart.all,
+  newdata=dbnsfp.hgmd.clinvar.1000G.num[-trIdx, cols.rankscore],
+  type="prob"
+)
+auc.rpart <- performance(
+  prediction(preds.rpart[, 2], Y[-trIdx] == "pathogenic"),
+  "auc"
+)@y.values[[1]]
+tpr.fpr.rpart <- performance(
+  prediction(preds.rpart[, 2], Y[-trIdx] == "pathogenic"),
+  "tpr", "fpr"
+)
+
+plot(tpr.fpr.rpart, colorize=TRUE)
+abline(v = 1 - our.tnr)
+abline(h = our.tpr)
+
+```
+
+```{r rpartNoVest}
+
+cols.rs.novest <- setdiff(cols.rankscore, "VEST3_rankscore")
+fit.rpart.novest <- train(
+  x = dbnsfp.hgmd.clinvar.1000G.num[trIdx, cols.rs.novest],
+  y = Y[trIdx],
+  method="rpart",
+  tuneLength = 10,
+  metric = "ROC",
+  trControl = trainControl(
+    summaryFunction = twoClassSummary,
+    classProbs = TRUE,
+    method = "repeatedcv",
+    repeats = 3)
+)
+
+preds.rpart.novest <- predict(
+  fit.rpart.novest,
+  newdata=dbnsfp.hgmd.clinvar.1000G.num[-trIdx, cols.rs.novest],
+  type="prob"
+)
+auc.rpart.novest <- performance(
+  prediction(preds.rpart.novest[, 2], Y[-trIdx] == "pathogenic"),
+  "auc"
+)@y.values[[1]]
+tpr.fpr.rpart.novest <- performance(
+  prediction(preds.rpart.novest[, 2], Y[-trIdx] == "pathogenic"),
+  "tpr", "fpr"
+)
+
+plot(tpr.fpr.rpart.novest, colorize=TRUE)
+abline(v = 1 - our.tnr)
+abline(h = our.tpr)
+
+```
+
+
+
+```{r gbm}
+
+fit.gbm.all <- train(
+  x = dbnsfp.hgmd.clinvar.1000G.num[trIdx, cols.rankscore],
+  y = Y[trIdx],
+  method="gbm",
+  tuneLength = 10,
+  metric = "ROC",
+  trControl = trainControl(
+    summaryFunction = twoClassSummary,
+    classProbs = TRUE,
+    method = "repeatedcv",
+    repeats = 3)
+)
+
+preds.gbm <- predict(
+  fit.gbm.all,
+  newdata=dbnsfp.hgmd.clinvar.1000G.num[-trIdx, cols.rankscore],
+  type="prob"
+)
+auc.gbm <- performance(
+  prediction(preds.gbm[, 2], Y[-trIdx] == "pathogenic"),
+  "auc"
+)@y.values[[1]]
+tpr.fpr.gbm <- performance(
+  prediction(preds.gbm[, 2], Y[-trIdx] == "pathogenic"),
+  "tpr", "fpr"
+)
+
+plot(tpr.fpr.gbm, colorize=TRUE)
+abline(v = 1 - our.tnr)
+abline(h = our.tpr)
+
+cols.rs.novest <- setdiff(cols.rankscore, "VEST3_rankscore")
+fit.gbm.novest <- train(
+  x = dbnsfp.hgmd.clinvar.1000G.num[trIdx, cols.rs.novest]
+  y = Y[trIdx],
+  method="gbm",
+  tuneLength = 10,
+  metric = "ROC",
+  trControl = trainControl(
+    summaryFunction = twoClassSummary,
+    classProbs = TRUE,
+    method = "repeatedcv",
+    repeats = 3)
+)
+
+preds.gbm.novest <- predict(
+  fit.gbm.novest,
+  newdata=dbnsfp.hgmd.clinvar.1000G.num[-trIdx, cols.rs.novest],
+  type="prob"
+)
+
+auc.gbm.novest <- performance(
+  prediction(preds.gbm.novest[, 2], Y[-trIdx] == "pathogenic"),
+  "auc"
+)@y.values[[1]]
+tpr.fpr.gbm.novest <- performance(
+  prediction(preds.gbm.novest[, 2], Y[-trIdx] == "pathogenic"),
+  "tpr", "fpr"
+)
+
+plot(tpr.fpr.gbm.novest, colorize=TRUE)
+abline(v = 1 - our.tnr)
+abline(h = our.tpr)
+
+
+```
+
+
+### Independent accuracy
+
+We can compute the accuracy of each model available in dbNSFP.
+
+```{r dbnsfpModelsAccuracy}
+
+auc.models.dbnsfp <- sort(
+  sapply(
+    cols.rankscore,
+    function(m) {
+      preds <- prediction(dbnsfp.hgmd.clinvar.1000G.num[-trIdx, m], Y[-trIdx] == "pathogenic")
+      perf <- performance(preds, "auc")@y.values[[1]]
+    }
+  ),
+  decreasing = TRUE
+)
+
+auc.models.dbnsfp.clinvar <- sort(
+  sapply(
+    cols.rankscore,
+    function(m) {
+      preds <- prediction(dbnsfp.clinvar[,m], dbnsfp.clinvar$CLASS == "pathogenic")
+      perf <- performance(preds, "auc")@y.values[[1]]
+    }
+  ),
+  decreasing = TRUE
+)
+
+```
+
+# Choosing the training set
+
+Models were too accurate, probably because HGMD is used as a training set by many of the 
+individual models. We will use only HGMD and 1000G data for training, and test the model on Clinvar.
+
+```{r chooseTrainingSet}
+
+
+fit.gbm.hgmd.1000G.all <- train(
+  x = dbnsfp.hgmd.1000G.num[, cols.rankscore],
+  y = dbnsfp.hgmd.1000G.num$CLASS,
+  method="gbm",
+  tuneLength = 10,
+  metric = "ROC",
+  trControl = trainControl(
+    summaryFunction = twoClassSummary,
+    classProbs = TRUE,
+    method = "repeatedcv",
+    repeats = 3)
+)
+
+preds.gbm.hgmd.1000G.all <- predict(
+  fit.gbm.hgmd.1000G.all,
+  newdata=dbnsfp.clinvar[, cols.rankscore],
+  type="prob"
+)
+auc.gbm.hgmd.1000G.all <- performance(
+  prediction(preds.gbm.hgmd.1000G.all[, 2], dbnsfp.clinvar$CLASS == "pathogenic"),
+  "auc"
+)@y.values[[1]]
+tpr.fpr.gbm.hgmd.1000G.all <- performance(
+  prediction(preds.gbm.hgmd.1000G.all[, 2], dbnsfp.clinvar$CLASS == "pathogenic"),
+  "tpr", "fpr"
+)
+
+plot(tpr.fpr.gbm.hgmd.1000G.all, colorize=TRUE)
+abline(v = 1 - our.tnr)
+abline(h = our.tpr)
+
+cols.rs.novest <- setdiff(cols.rankscore, "VEST3_rankscore")
+fit.gbm.hgmd.1000G.novest <- train(
+  x = dbnsfp.hgmd.1000G.num[, cols.rs.novest],
+  y = dbnsfp.hgmd.1000G$CLASS,
+  method="gbm",
+  tuneLength = 10,
+  metric = "ROC",
+  trControl = trainControl(
+    summaryFunction = twoClassSummary,
+    classProbs = TRUE,
+    method = "repeatedcv",
+    repeats = 3)
+)
+
+preds.gbm.hgmd.1000G.novest <- predict(
+  fit.gbm.hgmd.1000G.novest,
+  newdata=dbnsfp.clinvar[, cols.rs.novest],
+  type="prob"
+)
+
+auc.gbm.hgmd.1000G.novest <- performance(
+  prediction(preds.gbm.hgmd.1000G.novest[, 2], dbnsfp.clinvar$CLASS == "pathogenic"),
+  "auc"
+)@y.values[[1]]
+tpr.fpr.gbm.hgmd.1000G.novest <- performance(
+  prediction(preds.gbm.hgmd.1000G.novest[, 2], dbnsfp.clinvar$CLASS == "pathogenic"),
+  "tpr", "fpr"
+)
+
+plot(tpr.fpr.gbm.hgmd.1000G.novest, colorize=TRUE)
+abline(v = 1 - our.tnr)
+abline(h = our.tpr)
+
+```
+
+#Without proprietary models
+
+We will consider prediction without some of the proprietary models in dbNSFP.
+The (meta-)models will be trained on HGMD/1000G data, and tested on Clinvar data.
+
+```{r nopropmodels}
+
+prop.models <- c("CADD_raw_rankscore",
+                 "DANN_rankscore",
+                 "VEST3_rankscore",
+                 "FATHMM_converted_rankscore",
+                 "fathmm.MKL_coding_rankscore")
+cols.rs.nonprop <- setdiff(cols.rankscore, prop.models)
+fit.gbm.hgmd.1000G.nonprop <- train(
+  x = dbnsfp.hgmd.1000G.num[, cols.rs.nonprop],
+  y = dbnsfp.hgmd.1000G$CLASS,
+  method="gbm",
+  tuneLength = 10,
+  metric = "ROC",
+  trControl = trainControl(
+    summaryFunction = twoClassSummary,
+    classProbs = TRUE,
+    method = "repeatedcv",
+    repeats = 3)
+)
+
+preds.gbm.hgmd.1000G.nonprop <- predict(
+  fit.gbm.hgmd.1000G.nonprop,
+  newdata=dbnsfp.clinvar[, cols.rs.nonprop],
+  type="prob"
+)
+
+auc.gbm.hgmd.1000G.nonprop <- performance(
+  prediction(preds.gbm.hgmd.1000G.nonprop[, 2], dbnsfp.clinvar$CLASS == "pathogenic"),
+  "auc"
+)@y.values[[1]]
+tpr.fpr.gbm.hgmd.1000G.nonprop <- performance(
+  prediction(preds.gbm.hgmd.1000G.nonprop[, 2], dbnsfp.clinvar$CLASS == "pathogenic"),
+  "tpr", "fpr"
+)
+
+plot(tpr.fpr.gbm.hgmd.1000G.nonprop, colorize=TRUE)
+abline(v = 1 - our.tnr)
+abline(h = our.tpr)
+
+```
